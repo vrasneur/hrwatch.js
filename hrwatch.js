@@ -5,6 +5,8 @@ const HRW_PASSWORD = CHANGE_ME;
 E.setPassword(HRW_PASSWORD);
 E.lockConsole();
 
+E.enableWatchdog(3, false);
+
 var gatt;
 var adv_enabled = true;
 
@@ -138,6 +140,13 @@ exports.chargerVoltage=function(){
   //poke32(0x5000070c,2); // disconnect pin for power saving, otherwise it draws 70uA more
   return v;
 };
+exports.isCharging=function(){
+  return !!digitalRead(D2);
+};
+exports.DFUmode=function(){
+  NRF.wake();
+  poke32(0x4000051c,1)
+}
 function vibon(vib){
  if(vib.i>=1)D25.set();else analogWrite(D25,vib.i);
  setTimeout(viboff,vib.on,vib);
@@ -197,7 +206,7 @@ var model = {
   endDate: undefined,
   age: HRW_AGE,
   bpm: 0.0,
-  rrArray: new Uint16Array(5002), // The 1st and 2nd array elts are reserved to store current index and count
+  rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
   rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals
 
   computeDuration: function(start, end) {
@@ -478,33 +487,34 @@ var model = {
 };
 
 var gui = {
-  panelIdx: 0,
+  panelIdx: -1,
   nextPanelIdx: 0,
   panelTimeout: undefined,
   timeoutId: -1,
-  updatable: false,
-  panels: { 0x00: [function() {this.drawTitle("welcome");}, false, 0x01],
-            0x01: [function() {this.drawTitle("start");}, false, 0x02, 0x10],
-            0x02: [function() {this.drawTitle("view");}, false, 0x03, 0x20],
-            0x03: [function() {this.drawTitle("revert adv");}, false, 0x04, 0x30],
-            0x04: [function() {this.drawTitle("reboot");}, false, 0x05, 0x40],
-            0x05: [function() {this.drawTitle("off");}, false, 0x00, 0x50],
-            0x10: [function() {connectToHRM(true);}, false, 0x11, 0x11, 1],
-            0x11: [function() {this.drawHRPanel();}, true, 0x12],
-            0x12: [function() {this.drawHRPanel();}, true, 0x13],
-            0x13: [function() {this.drawHRPanel();}, true, 0x14],
-            0x14: [function() {this.drawHRPanel();}, true, 0x15],
-            0x15: [function() {this.drawHRPanel();}, true, 0x16],
-            0x16: [function() {this.drawHRPanel();}, true, 0x17],
-            0x17: [function() {this.drawHRPanel();}, true, 0x18],
-            0x18: [function() {this.drawHRPanel();}, true, 0x19],
-            0x19: [function() {this.drawHRPanel();}, true, 0x1a],
-            0x1a: [function() {this.drawTitle("exit");}, false, 0x11, 0x1b],
-            0x1b: [function() {disconnectHRM();}, false, 0x00, 0x00, 1],
-            0x20: [function() {this.viewHRData();}, false, 0x00],
-            0x30: [function() {revertBT();}, false, 0x00, 0x00, 1],
-            0x40: [function() {E.reboot();}, false, 0x00],
-            0x50: [function() {o.off();}, false, 0x00],
+  panels: { 0x00: [function() {this.drawTitle("welcome");}, 0x01],
+            0x01: [function() {this.drawTitle("start");}, 0x02, 0x10],
+            0x02: [function() {this.drawTitle("view");}, 0x03, 0x20],
+            0x03: [function() {this.drawTitle("revert adv");}, 0x04, 0x30],
+            0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
+	    0x05: [function() {this.drawTitle("-> DFU");}, 0x06, 0x50],
+            0x06: [function() {this.drawTitle("off");}, 0x00, 0x60],
+            0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
+            0x11: [function() {this.drawHRPanel();}, 0x12],
+            0x12: [function() {this.drawHRPanel();}, 0x13],
+            0x13: [function() {this.drawHRPanel();}, 0x14],
+            0x14: [function() {this.drawHRPanel();}, 0x15],
+            0x15: [function() {this.drawHRPanel();}, 0x16],
+            0x16: [function() {this.drawHRPanel();}, 0x17],
+            0x17: [function() {this.drawHRPanel();}, 0x18],
+            0x18: [function() {this.drawHRPanel();}, 0x19],
+            0x19: [function() {this.drawHRPanel();}, 0x1a],
+            0x1a: [function() {this.drawTitle("exit");}, 0x11, 0x1b],
+            0x1b: [function() {disconnectHRM();}, 0x00, 0x00, 1],
+            0x20: [function() {this.viewHRData();}, 0x00],
+            0x30: [function() {revertBT();}, 0x00, 0x00, 1],
+            0x40: [function() {E.reboot();}, 0x00],
+	    0x50: [function() {w.DFUmode();}, 0x00],
+            0x60: [function() {this.panelIdx = -1; o.off();}, 0x00],
   },
 
   nextPanel: function(idx1, idx2, timeout) {
@@ -522,7 +532,7 @@ var gui = {
       }
 
       if(this.panelTimeout !== undefined) {
-        this.timeoutId = setTimeout(() => {this.updatePanel(true); this.nextPanel(idx1, idx2, timeout);}, 1000);
+        this.timeoutId = setTimeout(() => {this.updatePanel(); this.nextPanel(idx1, idx2, timeout);}, 1000);
       }
       else {
         if(timeout === undefined) {
@@ -538,10 +548,13 @@ var gui = {
     o.on();
     o.gfx.clear();
     o.gfx.setFontDennis8();
+    let header = "";
+    if(w.isCharging()) {
+      header += "\x82";
+    }
     const bv = w.battVoltage().toFixed(1).toString() + "V";
-    let header = bv;
+    header += bv;
     if(this.panelTimeout !== undefined) {
-      console.log("tout", this.panelTimeout);
       const end = (this.panelTimeout === 0) ? 0 : (this.panelTimeout - 1);
       header += " \x9a " + model.computeDuration(0.0, end * 1000.0);
     }
@@ -567,8 +580,12 @@ var gui = {
     o.on();
     o.gfx.clear();
     const bpm = model.bpm;
+    let header = "";
+    if(w.isCharging()) {
+      header += "\x82";
+    }
     const bv = w.battVoltage().toFixed(1).toString() + "V";
-    let header = bv + " \x9a " + model.computeDuration();
+    header += bv + " \x9a " + model.computeDuration();
     if(this.panelIdx != 11) {
       header += " \x9a \x80 " + model.hrToString(bpm, 0, 0);
     }
@@ -617,9 +634,8 @@ var gui = {
         if(nbRR !== undefined) {
           sdnn5m = model.computeSDNN(Math.round(nbRR));
         }
-        const sdnn = model.computeSDNN();
         o.gfx.drawString("SDNN 5m: " + model.nbToString(sdnn5m), 0, 9);
-        o.gfx.drawString("SDNN all: " + model.nbToString(sdnn), 0, 20); }
+        o.gfx.drawString("ln(SDNN): " + model.nbToString(Math.log(sdnn5m)), 0, 20); }
         break;
       case 0x17: {
         o.gfx.setFontDennis8();
@@ -651,8 +667,8 @@ var gui = {
     o.flip();
   },
 
-  updatePanel: function(force) {
-    if(force || this.updatable) {
+  updatePanel: function() {
+    if(this.panelIdx !== -1) {
       this.panels[this.panelIdx][0].call(this);
     }
   },
@@ -665,25 +681,23 @@ var gui = {
     this.panelTimeout = undefined;
     this.panelIdx = this.nextPanelIdx;
     let panel = this.panels[this.panelIdx];
-    this.updatable = panel[1];
     let idx2 = undefined;
-    if(panel.length > 3) {
-      idx2 = panel[3];
+    if(panel.length > 2) {
+      idx2 = panel[2];
     }
     let timeout = undefined;
-    if(panel.length > 4) {
-      timeout = panel[4];
+    if(panel.length > 3) {
+      timeout = panel[3];
     }
-    this.nextPanel(panel[2], idx2, timeout);
-    this.updatePanel(true);
+    this.nextPanel(panel[1], idx2, timeout);
+    this.updatePanel();
   },
 
   reset: function() {
-    this.panelIdx = 0;
+    this.panelIdx = -1;
     this.nextPanelIdx = 0;
     this.panelTimeout = undefined;
     this.timeoutId = -1;
-    this.updatable = false;
   },
 };
 
@@ -707,7 +721,7 @@ function connectToHRM(s) {
   }).then(function(characteristic) {
     characteristic.on('characteristicvaluechanged', function(event) {
       model.update(event.target.value);
-      gui.updatePanel(false);
+      gui.updatePanel();
     });
     return characteristic.startNotifications();
   }).then(function() {
@@ -739,13 +753,16 @@ function revertBT() {
 }
 
 function buttonHandler(s) {
-  console.log("pressed", o.isOn);
-
   if(!o.isOn) {
     gui.reset();
   }
   gui.incPanel();
 }
+
+setInterval(() => {
+  gui.updatePanel();
+  E.kickWatchdog();
+}, 2000);
 
 setTimeout(() => {
   o.setContrast(10);
