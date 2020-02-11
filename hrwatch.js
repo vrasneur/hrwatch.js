@@ -145,7 +145,7 @@ exports.isCharging=function(){
 };
 exports.DFUmode=function(){
   NRF.wake();
-  poke32(0x4000051c,1)
+  poke32(0x4000051c,1);
 }
 function vibon(vib){
  if(vib.i>=1)D25.set();else analogWrite(D25,vib.i);
@@ -496,7 +496,7 @@ var gui = {
             0x02: [function() {this.drawTitle("view");}, 0x03, 0x20],
             0x03: [function() {this.drawTitle("revert adv");}, 0x04, 0x30],
             0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
-	    0x05: [function() {this.drawTitle("-> DFU");}, 0x06, 0x50],
+	    0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
             0x06: [function() {this.drawTitle("off");}, 0x00, 0x60],
             0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
             0x11: [function() {this.drawHRPanel();}, 0x12],
@@ -544,25 +544,56 @@ var gui = {
     this.nextPanelIdx = idx1;
   },
 
-  drawTitle: function(title) {
-    o.on();
+  drawHeader: function(duration, hr) {
     o.gfx.clear();
     o.gfx.setFontDennis8();
     let header = "";
     if(w.isCharging()) {
-      header += "\x82";
+      header += "\xa9";
     }
     const bv = w.battVoltage().toFixed(1).toString() + "V";
     header += bv;
+    if(duration !== undefined) {
+      header += " \x9a " + duration;
+    }
+    header += " \x9a ";
+    if(hr !== undefined) {
+      header += hr;
+    }
+    else {
+      header += "Adv: " + (adv_enabled ? "on" : "off");
+    }
+    o.gfx.drawString(header, 0, 0);
+    o.gfx.drawLine(0, 8, 128, 8);
+  },
+
+  drawBody: function(line1, line2, line3) {
+    if(line3 !== undefined) {
+      o.gfx.setFontDennis8();
+      o.gfx.drawString(line1, 0, 9);
+      o.gfx.drawString(line2, 0, 17);
+      o.gfx.drawString(line3, 0, 25);
+    }
+    else if(line2 !== undefined) {
+      o.gfx.setFont8x16();
+      o.gfx.drawString(line1, 0, 9);
+      o.gfx.drawString(line2, 0, 20);
+    }
+    else {
+      o.gfx.setFontVector(20);
+      o.gfx.drawString(line1, 0, 9);
+    }	
+  },
+
+  drawTitle: function(title) {
+    o.on();
+    let duration = undefined;
     if(this.panelTimeout !== undefined) {
       const end = (this.panelTimeout === 0) ? 0 : (this.panelTimeout - 1);
-      header += " \x9a " + model.computeDuration(0.0, end * 1000.0);
+      duration = model.computeDuration(0.0, end * 1000.0);
     }
-    header += " \x9a Adv: " + (adv_enabled ? "on" : "off");
-    o.gfx.drawString(header, 0, 0);
-    o.gfx.drawLine(0, 8,128, 8);
-    o.gfx.setFontVector(22);
-    o.gfx.drawString(title, 0, 9);
+    this.drawHeader(duration);
+    this.drawBody(title);  
     o.flip();
   },
 
@@ -579,81 +610,64 @@ var gui = {
   drawHRPanel: function() {
     o.on();
     o.gfx.clear();
-    const bpm = model.bpm;
-    let header = "";
-    if(w.isCharging()) {
-      header += "\x82";
+    let hhr = model.bpm;
+    if(this.panelIdx === 0x11) {
+      hhr = model.computeAvgHR();
     }
-    const bv = w.battVoltage().toFixed(1).toString() + "V";
-    header += bv + " \x9a " + model.computeDuration();
-    if(this.panelIdx != 11) {
-      header += " \x9a \x80 " + model.hrToString(bpm, 0, 0);
-    }
-    o.gfx.setFontDennis8();
-    o.gfx.drawString(header, 0, 0);
-    o.gfx.drawLine(0, 8,128, 8);
+    this.drawHeader(model.computeDuration(), "\x80 " + model.hrToString(hhr, 0, 0));
     switch(this.panelIdx) {
       case 0x11:
-        o.gfx.setFontVector(20);
-        o.gfx.drawString(model.hrToString(bpm, 0, 1), 0, 9);
+        this.drawBody(model.hrToString(model.bpm, 0, 1));
         break;
       case 0x12: {
-        o.gfx.setFont8x16();
         const ihr = model.computeIHR();
         const ahr = model.computeAvgHR();
-        o.gfx.drawString("IHR: " + model.hrToString(ihr), 0, 9);
-        o.gfx.drawString("HR AVG: " + model.hrToString(ahr), 0, 20); }
+        this.drawBody("IHR: " + model.hrToString(ihr),
+                      "HR AVG: " + model.hrToString(ahr)); }
         break;
       case 0x13: {
-        o.gfx.setFont8x16();
         const hr10 = 6.0 * model.computeNbRRVals(10);
         const hr60 = model.computeNbRRVals(60);
-        o.gfx.drawString("HR 10s: " + model.hrToString(hr10), 0, 9);
-        o.gfx.drawString("HR 60s: " + model.hrToString(hr60), 0, 20); }
+        this.drawBody("HR 10s: " + model.hrToString(hr10),
+                      "HR 60s: " + model.hrToString(hr60)); }
         break;
       case 0x14: {
-        o.gfx.setFont8x16();
         let rmssd5m = undefined;
         const nbRR = model.computeNbRRVals(300);
         if(nbRR !== undefined) {
           rmssd5m = model.computeRMSSD(Math.round(nbRR));
         }
-        o.gfx.drawString("RMSSD 5m: " + model.nbToString(rmssd5m), 0, 9);
-        o.gfx.drawString("ln(RMSSD): " + model.nbToString(Math.log(rmssd5m)), 0, 20); }
+        this.drawBody("RMSSD 5m: " + model.nbToString(rmssd5m),
+                      "ln(RMSSD): " + model.nbToString(Math.log(rmssd5m))); }
         break;
       case 0x15: {
-        o.gfx.setFont8x16();
-        const rmssd = model.computeRMSSD();
-        o.gfx.drawString("RMSSD all: " + model.nbToString(rmssd), 0, 9);
-        o.gfx.drawString("ln(RMSSD): " + model.nbToString(Math.log(rmssd)), 0, 20); }
+        const rmssd = model.computeTotalRMSSD();
+        this.drawBody("RMSSD all: " + model.nbToString(rmssd),
+                      "ln(RMSSD): " + model.nbToString(Math.log(rmssd))); }
         break;
       case 0x16: {
-        o.gfx.setFont8x16();
         let sdnn5m = undefined;
         const nbRR = model.computeNbRRVals(300);
         if(nbRR !== undefined) {
           sdnn5m = model.computeSDNN(Math.round(nbRR));
         }
-        o.gfx.drawString("SDNN 5m: " + model.nbToString(sdnn5m), 0, 9);
-        o.gfx.drawString("ln(SDNN): " + model.nbToString(Math.log(sdnn5m)), 0, 20); }
+        this.drawBody("SDNN 5m: " + model.nbToString(sdnn5m),
+                      "ln(SDNN): " + model.nbToString(Math.log(sdnn5m))); }
         break;
       case 0x17: {
-        o.gfx.setFontDennis8();
-        o.gfx.drawString("< 50%:   " + model.computeDuration(0, model.computeTotalRRVal(0) / 1.024), 0, 9);
-        o.gfx.drawString("50%-60%: " + model.computeDuration(0, model.computeTotalRRVal(1) / 1.024), 0, 17);
-        o.gfx.drawString("60%-70%: " + model.computeDuration(0, model.computeTotalRRVal(2) / 1.024), 0, 25); }
+        this.drawBody("< 50%:   " + model.computeDuration(0, model.computeTotalRRVal(0) / 1.024),
+                      "50%-60%: " + model.computeDuration(0, model.computeTotalRRVal(1) / 1.024),
+                      "60%-70%: " + model.computeDuration(0, model.computeTotalRRVal(2) / 1.024)); }
         break;
       case 0x18: {
-        o.gfx.setFontDennis8();
-        o.gfx.drawString("70%-80%: " + model.computeDuration(0, model.computeTotalRRVal(3) / 1.024), 0, 9);
-        o.gfx.drawString("80%-90%: " + model.computeDuration(0, model.computeTotalRRVal(4) / 1.024), 0, 17);
-        o.gfx.drawString("90%-100%: " + model.computeDuration(0, model.computeTotalRRVal(5) / 1.024), 0, 25); }
+        this.drawBody("70%-80%: " + model.computeDuration(0, model.computeTotalRRVal(3) / 1.024),
+                      "80%-90%: " + model.computeDuration(0, model.computeTotalRRVal(4) / 1.024),
+                      "90%-100%: " + model.computeDuration(0, model.computeTotalRRVal(5) / 1.024)); }
         break;
       case 0x19: {
-        o.gfx.setFontDennis8();
-        o.gfx.drawString(">= 100%: " + model.computeDuration(0, model.computeTotalRRVal(6) / 1.024), 0, 9);
-        o.gfx.drawString("Nb RRI: " + model.computeTotalRRValCount(), 0, 17);
-        o.gfx.drawString("Max HR: " + model.computeMaxHR(model.age), 0, 25); }
+        this.drawBody(">= 100%: " + model.computeDuration(0, model.computeTotalRRVal(6) / 1.024),
+                      "Nb RRI: " + model.computeTotalRRValCount(),
+                      "Max HR: " + model.computeMaxHR(model.age)); }
         break;
     }
     o.flip();
@@ -760,13 +774,13 @@ function buttonHandler(s) {
 }
 
 setInterval(() => {
-  gui.updatePanel();
   E.kickWatchdog();
 }, 2000);
 
 setTimeout(() => {
   o.setContrast(10);
   setWatch(buttonHandler, BTN1, true);
+  setWatch(() => {gui.updatePanel();}, D2, true);  
 }, 3000);
 
 setupSerial();// first set to known state
