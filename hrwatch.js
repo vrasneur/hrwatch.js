@@ -147,6 +147,23 @@ exports.DFUmode=function(){
   NRF.wake();
   poke32(0x4000051c,1);
 }
+exports.deviceName=function(){
+  // extract the local device name from the advertising data
+  const adv = NRF.getAdvertisingData();
+  if(adv.length > 0) {
+    const start = 1 + adv[0];
+    if(start < adv.length) {
+      const len = adv[start];
+      // 0x08 is for "Shortened local name"
+      // 0x09 is for "Complete local name"
+      if(len > 2 && len == adv.length - start - 1 &&
+         (adv[start + 1] == 0x08 || adv[start + 1] == 0x09)) {
+        return String.fromCharCode.apply(this, adv).substr(start + 2);
+      }
+    }
+  }
+  return undefined;
+}
 function vibon(vib){
  if(vib.i>=1)D25.set();else analogWrite(D25,vib.i);
  setTimeout(viboff,vib.on,vib);
@@ -598,7 +615,8 @@ var gui = {
             0x03: [function() {this.drawTitle("revert adv");}, 0x04, 0x30],
             0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
             0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
-            0x06: [function() {this.drawTitle("off");}, 0x00, 0x60],
+            0x06: [function() {this.drawInfos();}, 0x07, 0x06],
+            0x07: [function() {this.drawTitle("off");}, 0x00, 0x70],
             0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
             0x11: [function() {this.drawHRPanel();}, 0x12],
             0x12: [function() {this.drawHRPanel();}, 0x13],
@@ -615,7 +633,7 @@ var gui = {
             0x30: [function() {revertBT();}, 0x00, 0x00, 1],
             0x40: [function() {E.reboot();}, 0x00],
 	    0x50: [function() {w.DFUmode();}, 0x00],
-            0x60: [function() {this.panelIdx = -1; o.off();}, 0x00],
+            0x70: [function() {this.panelIdx = -1; o.off();}, 0x00],
   },
 
   nextPanel: function(idx1, idx2, timeout) {
@@ -648,6 +666,11 @@ var gui = {
   drawHeader: function(duration, hr) {
     o.gfx.clear();
     o.gfx.setFontDennis8();
+    if(this.panelTimeout !== undefined) {
+      const end = (this.panelTimeout === 0) ? 0 : (this.panelTimeout - 1);
+      duration = model.computeDuration(0.0, end * 1000.0);
+    }
+
     let header = "";
     if(w.isCharging()) {
       header += "\xa9";
@@ -688,13 +711,17 @@ var gui = {
 
   drawTitle: function(title) {
     o.on();
-    let duration = undefined;
-    if(this.panelTimeout !== undefined) {
-      const end = (this.panelTimeout === 0) ? 0 : (this.panelTimeout - 1);
-      duration = model.computeDuration(0.0, end * 1000.0);
-    }
-    this.drawHeader(duration);
+    this.drawHeader();
     this.drawBody(title);  
+    o.flip();
+  },
+
+  drawInfos: function() {
+    o.on();
+    this.drawHeader();
+    this.drawBody("Name: " + w.deviceName(),
+                  "BT addr: " + NRF.getAddress(),
+		  "Temp: " + E.getTemperature().toFixed(2).toString() + " °C");
     o.flip();
   },
 
