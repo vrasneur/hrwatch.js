@@ -224,8 +224,8 @@ var model = {
   age: HRW_AGE,
   bpm: 0.0,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
-  rrDiff: new Uint16Array(1500),
-  rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals
+  rrDiff: new Uint16Array(1500), // store |RRI prec - RRI| to precompute RMSSD for short durations
+  rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zones (7)
 
   computeDuration: function(start, end) {
     if(start === undefined) {
@@ -483,7 +483,7 @@ var model = {
     return rmssd;
   },
 
-  // keep the "slow" way to compute SDNN
+  // keep the "slow" way to compute RMSSD
   // so we can compare the fast and slow outputs
   computeRMSSDSlow: function(count) {
     const length = this.rrArray[1];
