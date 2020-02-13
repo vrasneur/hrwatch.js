@@ -343,6 +343,7 @@ var model = {
     this.endDate = undefined;
     this.bpm = 0.0;
     this.rrArray.fill(0);
+    this.rrDiff.fill(0);
     this.rrTotal.fill(0);
   },
 
