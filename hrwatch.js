@@ -207,6 +207,7 @@ var model = {
   age: HRW_AGE,
   bpm: 0.0,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
+  rrDiff: new Uint16Array(1500),
   rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals
 
   computeDuration: function(start, end) {
@@ -272,7 +273,9 @@ var model = {
     this.rrTotal[(3 * zone) + 2]++;
 
     if(this.rrArray[1] !== 0) {
-      this.rrTotal[(3 * zone) + 1] += Math.pow((rrval - this.rrArray[2 + this.rrArray[0]]) / 1.024, 2);
+      const diff = rrval - this.rrArray[2 + this.rrArray[0]];
+      this.rrTotal[(3 * zone) + 1] += Math.pow(diff, 2);
+      this.rrDiff[this.rrArray[0]] = Math.abs(diff);
       this.rrArray[0] = (this.rrArray[0] + 1) % (this.rrArray.length - 2);
     }
     if(this.rrArray[1] < this.rrArray.length - 2) {
@@ -311,7 +314,7 @@ var model = {
       return undefined;
     }
 
-    return Math.sqrt(this.computeTotalRRVal(zone, 1) / (count - 1));
+    return Math.sqrt(this.computeTotalRRVal(zone, 1) / (count - 1)) / 1.024;
   },
 
   empty: function() {
@@ -360,7 +363,33 @@ var model = {
   computeHR: function(count) {
     const length = this.rrArray[1];
     if(length === 0) {
-      return 0.0;
+      return undefined;
+    }
+    if(count === undefined || count > length) {
+      count = length;
+    }
+    if(count <= 0) {
+      return undefined;
+    }
+
+    const idx = this.rrArray[0];
+    const res = idx - (count - 1);
+    const tmp = new Uint16Array(this.rrArray.buffer, (res < 0) ? 4 : (2 + res) * 2, (res < 0) ? count + res : count);
+    let srrval = E.sum(tmp);
+    if(res < 0) {
+      const tmp2 = new Uint16Array(this.rrArray.buffer, (2 + length + res) * 2, -res);
+      srrval += E.sum(tmp2);
+    }
+
+    return this.computeBpm(srrval, count);
+  },
+    
+  // keep the "slow" way to compute heart rate
+  // so we can compare the fast and slow outputs
+  computeHRSlow: function(count) {
+    const length = this.rrArray[1];
+    if(length === 0) {
+      return undefined;
     }
     if(count === undefined || count > length) {
       count = length;
@@ -408,37 +437,108 @@ var model = {
   },
 
   computeRMSSD: function(count) {
-    let rmssd = 0.0;
     const length = this.rrArray[1];
+    console.log("count", count);
 
     if(length < 2) {
-      return rmssd;
+      return undefined;
     }
     if(count === undefined || count > length) {
       count = length;
     }
 
+    count -= 1;
+    if(count <= 0) {
+      return undefined;
+    }
+
+    let rmssd = 0.0;
+    const idx = (length + this.rrArray[0] - 1) % length;
+    const res = idx - (count - 1);
+    const tmp = new Uint16Array(this.rrDiff.buffer, (res < 0) ? 0 : res * 2, (res < 0) ? count + res : count);
+    rmssd = E.variance(tmp, 0);
+    if(res < 0) {
+      const tmp2 = new Uint16Array(this.rrDiff.buffer, (length + res) * 2, -res);
+      rmssd += E.variance(tmp2, 0);	  
+    }
+      
+    rmssd = Math.sqrt(rmssd / count) / 1.024;
+    return rmssd;
+  },
+
+  // keep the "slow" way to compute SDNN
+  // so we can compare the fast and slow outputs
+  computeRMSSDSlow: function(count) {
+    const length = this.rrArray[1];
+
+    if(length < 2) {
+      return undefined;
+    }
+    if(count === undefined || count > length) {
+      count = length;
+    }
+
+    let rmssd = 0.0;
+    let locidx = this.rrArray[0];
+    let locval = this.rrArray[2 + locidx];  
     for(let idx = 0; idx < count - 1; idx++) {
-      const locidx = (length + this.rrArray[0] - idx) % length;
       const previdx = (length + locidx - 1) % length;
-      rmssd += Math.pow((this.rrArray[2 + locidx] - this.rrArray[2 + previdx]) / 1.024, 2);
+      const prevval = this.rrArray[2 + previdx];
+      rmssd += Math.pow((locval - prevval) / 1.024, 2);
+      locidx = previdx;
+      locval = prevval;
     }
 
     rmssd = Math.sqrt(rmssd / (count - 1));
     return rmssd;
-  },
+  }, 
 
   computeSDNN: function(count) {
-    let sdnn = 0.0;
     const length = this.rrArray[1];
 
     if(length < 2) {
-      return sdnn;
+      return undefined;
+    }
+    if(count === undefined || count > length) {
+      count = length;
+    }
+    if(count <= 0) {
+      return undefined;
+    }
+
+    let sdnn = 0.0;
+    const idx = this.rrArray[0];
+    const res = idx - (count - 1);
+    const tmp = new Uint16Array(this.rrArray.buffer, (res < 0) ? 4 : (2 + res) * 2, (res < 0) ? count + res : count);
+    let avg = E.sum(tmp);
+    if(res < 0) {
+      const tmp2 = new Uint16Array(this.rrArray.buffer, (2 + length + res) * 2, -res);
+      avg += E.sum(tmp2);
+      avg /= count;
+      sdnn = E.variance(tmp, avg) + E.variance(tmp2, avg);	  
+    }
+    else {
+      avg /= count;
+      sdnn = E.variance(tmp, avg);
+    }
+      
+    sdnn = Math.sqrt(sdnn / (count - 1)) / 1.024;
+    return sdnn;
+  },
+
+  // keep the "slow" way to compute SDNN
+  // so we can compare the fast and slow outputs
+  computeSDNNSlow: function(count) {
+    const length = this.rrArray[1];
+
+    if(length < 2) {
+      return undefined;
     }
     if(count === undefined || count > length) {
       count = length;
     }
 
+    let sdnn = 0.0;
     let avg = 0.0;
     for(let idx = 0; idx < count; idx++) {
       const locidx = (length + this.rrArray[0] - idx) % length;
@@ -460,15 +560,16 @@ var model = {
   computeNbRRVals: function(dur) {
     const length = this.rrArray[1];
     if(length === 0) {
-      return 0.0;
+      return undefined;
     }
 
+    dur *= 1024.0;
     let found = false;
     let count = 0;
     let srrval = 0.0;
     for(let idx = 0; idx < length; idx++) {
       const locidx = (length + this.rrArray[0] - idx) % length;
-      const rrval = this.rrArray[2 + locidx] / 1024.0;
+      const rrval = this.rrArray[2 + locidx];
       srrval += rrval;
       if(srrval >= dur) {
         found = true;
@@ -496,7 +597,7 @@ var gui = {
             0x02: [function() {this.drawTitle("view");}, 0x03, 0x20],
             0x03: [function() {this.drawTitle("revert adv");}, 0x04, 0x30],
             0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
-	    0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
+            0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
             0x06: [function() {this.drawTitle("off");}, 0x00, 0x60],
             0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
             0x11: [function() {this.drawHRPanel();}, 0x12],
@@ -603,7 +704,7 @@ var gui = {
       this.nextPanel(0x1a);
     }
     else {
-	this.nextPanel(0x11, 0x11, 1);
+      this.nextPanel(0x11, 0x11, 1);
     }
   },
   
