@@ -224,7 +224,7 @@ var model = {
   age: HRW_AGE,
   bpm: 0.0,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
-  rrDiff: new Uint16Array(1500), // store |RRI prec - RRI| to precompute RMSSD for short durations
+  rrDiff: new Int16Array(1500), // store |RRI prec - RRI| to precompute RMSSD for short durations
   rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zones (7)
 
   computeDuration: function(start, end) {
@@ -241,20 +241,28 @@ var model = {
     if(end === undefined) {
       end = Date.now();
     }
-    const dd = (end - start) / 1000; // in seconds
+    let dur = ""
+    let dd = (end - start) / 1000; // in seconds
+    if(dd < 0) {
+      dur += "-";
+      dd = -dd;	
+    }
     let h = ~~(dd / 3600);
     if(h <= 9) {
       h = "0" + h;
     }
+    dur += h + ":";
     let m = ~~((dd % 3600) / 60);
     if(m <= 9) {
       m = "0" + m;
     }
+    dur += m + ":";
     let s = ~~(dd % 60);
     if(s <= 9) {
       s = "0" + s;
     }
-    return (h + ":" + m + ":" + s);
+    dur += s;
+    return dur;
   },
 
   update: function(value) {
@@ -271,41 +279,41 @@ var model = {
         offset =  offset + 2; // plus 2 bytes
     }
 
-    // determine if RR-interval data are present //
+    // determine if RR interval data are present //
     if ((value.getUint8(0) & (1 << 4)) !== 0)
     {
       const length = value.byteLength;
-      const count = (length - offset) / 2;
+      const count = (length - offset) >> 1;
       for(let idx = 0; idx < count; idx++) {
-        let rrval = value.getUint16(offset + (idx * 2));
-        rrval = (rrval >> 8) | ((rrval << 8) & 0xffff);
-        this.addRRval(rrval);
+        let rri = value.getUint16(offset + (idx * 2));
+        rri = (rri >> 8) | ((rri << 8) & 0xffff);
+        this.addRRI(rri);
       }
     }
   },
 
-  addRRval: function(rrval) {
-    const zone = this.computeBpmZone(this.computeBpm(rrval));
-    this.rrTotal[3 * zone] += rrval;
+  addRRI: function(rri) {
+    const zone = this.computeBpmZone(this.computeBpm(rri));
+    this.rrTotal[3 * zone] += rri;
     this.rrTotal[(3 * zone) + 2]++;
 
     if(this.rrArray[1] !== 0) {
-      const diff = rrval - this.rrArray[2 + this.rrArray[0]];
+      const diff = rri - this.rrArray[2 + this.rrArray[0]];
       this.rrTotal[(3 * zone) + 1] += Math.pow(diff, 2);
-      this.rrDiff[this.rrArray[0]] = Math.abs(diff);
+      this.rrDiff[this.rrArray[0]] = diff;
       this.rrArray[0] = (this.rrArray[0] + 1) % (this.rrArray.length - 2);
     }
     if(this.rrArray[1] < this.rrArray.length - 2) {
       this.rrArray[1]++;
     }
-    this.rrArray[2 + this.rrArray[0]] = rrval;
+    this.rrArray[2 + this.rrArray[0]] = rri;
   },
 
   rrLength: function() {
     return this.rrArray[1];
   },
 
-  computeTotalRRVal: function(zone, index) {
+  computeTotalRRI: function(zone, index) {
     if(index === undefined || index > 6) {
       index = 0;
     }
@@ -321,17 +329,17 @@ var model = {
     return this.rrTotal[(3 * zone) + index];
   },
 
-  computeTotalRRValCount: function(zone) {
-    return this.computeTotalRRVal(zone, 2);
+  computeTotalRRICount: function(zone) {
+    return this.computeTotalRRI(zone, 2);
   },
 
   computeTotalRMSSD: function(zone) {
-    const count = this.computeTotalRRValCount(zone);
+    const count = this.computeTotalRRICount(zone);
     if(count < 2) {
       return undefined;
     }
 
-    return Math.sqrt(this.computeTotalRRVal(zone, 1) / (count - 1)) / 1.024;
+    return Math.sqrt(this.computeTotalRRI(zone, 1) / (count - 1)) / 1.024;
   },
 
   empty: function() {
@@ -351,12 +359,12 @@ var model = {
     return (220 - age);
   },
 
-  computeBpm: function(rrval, count) {
+  computeBpm: function(rri, count) {
     if(count === undefined) {
       count = 1;
     }
 
-    return (60.0 * 1024.0 * count) / rrval;
+    return (60.0 * 1024.0 * count) / rri;
   },
 
   computeBpmPc: function(bpm) {
@@ -377,49 +385,55 @@ var model = {
     return ~~((pc - 40) / 10);
   },
 
-  // compute HR (bpm) for "count" RR intervals.
-  computeHR: function(count) {
+  sumRRI: function(count) {
     const length = this.rrArray[1];
     if(length === 0) {
       return undefined;
     }
-    if(count === undefined || count > length) {
-      count = length;
-    }
-    if(count <= 0) {
+    if(count === undefined || count <= 0 || count > length) {
       return undefined;
     }
 
     const idx = this.rrArray[0];
     const res = idx - (count - 1);
     const tmp = new Uint16Array(this.rrArray.buffer, (res < 0) ? 4 : (2 + res) * 2, (res < 0) ? count + res : count);
-    let srrval = E.sum(tmp);
+    let srri = E.sum(tmp);
     if(res < 0) {
       const tmp2 = new Uint16Array(this.rrArray.buffer, (2 + length + res) * 2, -res);
-      srrval += E.sum(tmp2);
+      srri += E.sum(tmp2);
     }
 
-    return this.computeBpm(srrval, count);
+    return srri;
   },
-    
-  // keep the "slow" way to compute heart rate
+
+  // keep the "slow" way to sum RR intervals
   // so we can compare the fast and slow outputs
-  computeHRSlow: function(count) {
+  sumRRISlow: function(count) {
     const length = this.rrArray[1];
     if(length === 0) {
       return undefined;
     }
-    if(count === undefined || count > length) {
-      count = length;
+    if(count === undefined || count <= 0 || count > length) {
+      return undefined;
     }
 
-    let srrval = 0.0;
+    let srri = 0.0;
     for(let idx = 0; idx < count; idx++) {
       const locidx = (length + this.rrArray[0] - idx) % length;
-      srrval += this.rrArray[2 + locidx];
+      srri += this.rrArray[2 + locidx];
     }
 
-    return this.computeBpm(srrval, count);
+    return srri;
+  },
+
+  // compute HR (bpm) for "count" RR intervals.
+  computeHR: function(count) {
+    const srri = this.sumRRI(count);
+    if(srri === undefined) {
+      return undefined;
+    }
+
+    return this.computeBpm(srri, count);
   },
 
   // compute instantaneous heart rate
@@ -428,7 +442,7 @@ var model = {
   },
 
   computeAvgHR: function() {
-    return this.computeBpm(this.computeTotalRRVal(), this.computeTotalRRValCount());
+    return this.computeBpm(this.computeTotalRRI(), this.computeTotalRRICount());
   },
 
   hrToString: function(hr, nbDigits, pcNbDigits) {
@@ -456,8 +470,6 @@ var model = {
 
   computeRMSSD: function(count) {
     const length = this.rrArray[1];
-    console.log("count", count);
-
     if(length < 2) {
       return undefined;
     }
@@ -471,12 +483,13 @@ var model = {
     }
 
     let rmssd = 0.0;
+    // diff between previous and current rris is stored in rrDiff[idx - 1]
     const idx = (length + this.rrArray[0] - 1) % length;
     const res = idx - (count - 1);
-    const tmp = new Uint16Array(this.rrDiff.buffer, (res < 0) ? 0 : res * 2, (res < 0) ? count + res : count);
+    const tmp = new Int16Array(this.rrDiff.buffer, (res < 0) ? 0 : res * 2, (res < 0) ? count + res : count);
     rmssd = E.variance(tmp, 0);
     if(res < 0) {
-      const tmp2 = new Uint16Array(this.rrDiff.buffer, (length + res) * 2, -res);
+      const tmp2 = new Int16Array(this.rrDiff.buffer, (length + res) * 2, -res);
       rmssd += E.variance(tmp2, 0);	  
     }
       
@@ -488,7 +501,6 @@ var model = {
   // so we can compare the fast and slow outputs
   computeRMSSDSlow: function(count) {
     const length = this.rrArray[1];
-
     if(length < 2) {
       return undefined;
     }
@@ -513,7 +525,6 @@ var model = {
 
   computeSDNN: function(count) {
     const length = this.rrArray[1];
-
     if(length < 2) {
       return undefined;
     }
@@ -548,7 +559,6 @@ var model = {
   // so we can compare the fast and slow outputs
   computeSDNNSlow: function(count) {
     const length = this.rrArray[1];
-
     if(length < 2) {
       return undefined;
     }
@@ -575,7 +585,64 @@ var model = {
   },
 
   // how many RR intervals for a duration of "dur" seconds?
-  computeNbRRVals: function(dur) {
+  countRRI: function(dur) {
+    const length = this.rrArray[1];
+    if(length === 0) {
+      return undefined;
+    }
+
+    const curIdx = this.rrArray[0];
+    dur *= 1024.0;
+    let srri = E.sum(this.rrArray) - length - curIdx;
+    if(srri < dur) {
+      return undefined;
+    }
+    if(srri === dur) {
+      return length;
+    }
+
+    // as E.sum() is fast but manual looping is slow,
+    // do a binary search to have the minimal number of loops
+    let low = 1;
+    let high = length;      
+    let found = false;
+    let count = undefined;
+    while(low <= high) {
+      let middle = (low + high) >> 1;
+      srri = this.sumRRI(middle);
+      if(srri === dur) {
+        found = true;
+        count = middle;
+        break;
+      }
+      if(srri < dur) {
+        if(middle < length) {
+          const locidx = (length + curIdx - middle) % length;
+          const rri = this.rrArray[2 + locidx];
+          if(srri + rri > dur) {
+            found = true;
+            count = middle + ((dur - srri) / rri);
+            break;
+          }
+        }
+
+        low = middle + 1;
+      }
+      else {
+        high = middle - 1;
+      }
+    }
+      
+    if(!found) {
+      return undefined;
+    }
+
+    return count;
+  },
+
+  // keep the "slow" way to compute RRI count
+  // so we can compare the fast and slow outputs
+  countRRISlow: function(dur) {
     const length = this.rrArray[1];
     if(length === 0) {
       return undefined;
@@ -584,14 +651,14 @@ var model = {
     dur *= 1024.0;
     let found = false;
     let count = 0;
-    let srrval = 0.0;
+    let srri = 0.0;
     for(let idx = 0; idx < length; idx++) {
       const locidx = (length + this.rrArray[0] - idx) % length;
-      const rrval = this.rrArray[2 + locidx];
-      srrval += rrval;
-      if(srrval >= dur) {
+      const rri = this.rrArray[2 + locidx];
+      srri += rri;
+      if(srri >= dur) {
         found = true;
-        count += ((dur - (srrval - rrval)) / rrval);
+        count += ((dur - (srri - rri)) / rri);
         break;
       }
       count++;
@@ -755,14 +822,14 @@ var gui = {
                       "HR AVG: " + model.hrToString(ahr)); }
         break;
       case 0x13: {
-        const hr10 = 6.0 * model.computeNbRRVals(10);
-        const hr60 = model.computeNbRRVals(60);
+        const hr10 = 6.0 * model.countRRI(10);
+        const hr60 = model.countRRI(60);
         this.drawBody("HR 10s: " + model.hrToString(hr10),
                       "HR 60s: " + model.hrToString(hr60)); }
         break;
       case 0x14: {
         let rmssd5m = undefined;
-        const nbRR = model.computeNbRRVals(300);
+        const nbRR = model.countRRI(300);
         if(nbRR !== undefined) {
           rmssd5m = model.computeRMSSD(Math.round(nbRR));
         }
@@ -776,7 +843,7 @@ var gui = {
         break;
       case 0x16: {
         let sdnn5m = undefined;
-        const nbRR = model.computeNbRRVals(300);
+        const nbRR = model.countRRI(300);
         if(nbRR !== undefined) {
           sdnn5m = model.computeSDNN(Math.round(nbRR));
         }
@@ -784,18 +851,18 @@ var gui = {
                       "ln(SDNN): " + model.nbToString(Math.log(sdnn5m))); }
         break;
       case 0x17: {
-        this.drawBody("< 50%:   " + model.computeDuration(0, model.computeTotalRRVal(0) / 1.024),
-                      "50%-60%: " + model.computeDuration(0, model.computeTotalRRVal(1) / 1.024),
-                      "60%-70%: " + model.computeDuration(0, model.computeTotalRRVal(2) / 1.024)); }
+        this.drawBody("< 50%:   " + model.computeDuration(0, model.computeTotalRRI(0) / 1.024),
+                      "50%-60%: " + model.computeDuration(0, model.computeTotalRRI(1) / 1.024),
+                      "60%-70%: " + model.computeDuration(0, model.computeTotalRRI(2) / 1.024)); }
         break;
       case 0x18: {
-        this.drawBody("70%-80%: " + model.computeDuration(0, model.computeTotalRRVal(3) / 1.024),
-                      "80%-90%: " + model.computeDuration(0, model.computeTotalRRVal(4) / 1.024),
-                      "90%-100%: " + model.computeDuration(0, model.computeTotalRRVal(5) / 1.024)); }
+        this.drawBody("70%-80%: " + model.computeDuration(0, model.computeTotalRRI(3) / 1.024),
+                      "80%-90%: " + model.computeDuration(0, model.computeTotalRRI(4) / 1.024),
+                      "90%-100%: " + model.computeDuration(0, model.computeTotalRRI(5) / 1.024)); }
         break;
       case 0x19: {
-        this.drawBody(">= 100%: " + model.computeDuration(0, model.computeTotalRRVal(6) / 1.024),
-                      "Nb RRI: " + model.computeTotalRRValCount(),
+        this.drawBody(">= 100%: " + model.computeDuration(0, model.computeTotalRRI(6) / 1.024),
+                      "Nb RRI: " + model.computeTotalRRICount(),
                       "Max HR: " + model.computeMaxHR(model.age)); }
         break;
     }
