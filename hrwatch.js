@@ -146,7 +146,7 @@ exports.isCharging=function(){
 exports.DFUmode=function(){
   NRF.wake();
   poke32(0x4000051c,1);
-}
+};
 exports.deviceName=function(){
   // extract the local device name from the advertising data
   const adv = NRF.getAdvertisingData();
@@ -163,7 +163,7 @@ exports.deviceName=function(){
     }
   }
   return undefined;
-}
+};
 function vibon(vib){
  if(vib.i>=1)D25.set();else analogWrite(D25,vib.i);
  setTimeout(viboff,vib.on,vib);
@@ -241,7 +241,7 @@ var model = {
     if(end === undefined) {
       end = Date.now();
     }
-    let dur = ""
+    let dur = "";
     let dd = (end - start) / 1000; // in seconds
     if(dd < 0) {
       dur += "-";
@@ -683,7 +683,7 @@ var gui = {
             0x03: [function() {this.drawTitle("revert adv");}, 0x04, 0x30],
             0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
             0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
-            0x06: [function() {this.drawInfos();}, 0x07, 0x06],
+            0x06: [function() {this.drawDeviceInfos();}, 0x07, 0x06],
             0x07: [function() {this.drawTitle("off");}, 0x00, 0x70],
             0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
             0x11: [function() {this.drawHRPanel();}, 0x12],
@@ -784,7 +784,7 @@ var gui = {
     o.flip();
   },
 
-  drawInfos: function() {
+  drawDeviceInfos: function() {
     o.on();
     this.drawHeader();
     this.drawBody("Name: " + w.deviceName(),
