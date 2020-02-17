@@ -1,5 +1,6 @@
 const HRW_HRMONITOR_ADDR = CHANGE_ME;
 const HRW_AGE = CHANGE_ME;
+const HRW_VIBRATE_THRESHOLD = CHANGE_ME;
 const HRW_PASSWORD = CHANGE_ME;
 
 E.setPassword(HRW_PASSWORD);
@@ -222,17 +223,18 @@ var model = {
   startDate: undefined,
   endDate: undefined,
   age: HRW_AGE,
-  bpm: 0.0,
+  bpm: undefined,
+  bpmPc: undefined,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
-  rrDiff: new Int16Array(1500), // store |RRI prec - RRI| to precompute RMSSD for short durations
-  rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zones (7)
+  rrDiff: new Int16Array(1500), // store (RRI prec - RRI) to precompute RMSSD for short durations
+  rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zone (7)
 
   computeDuration: function(start, end) {
     if(start === undefined) {
       start = this.startDate;
     }
     if(start === undefined) {
-      return "";
+      return undefined;
     }
 
     if(end === undefined) {
@@ -241,8 +243,17 @@ var model = {
     if(end === undefined) {
       end = Date.now();
     }
+    return (end - start);
+  },
+
+  durationToString: function(start, end) {
+    let dd = this.computeDuration(start, end);
+    if(dd === undefined) {
+      return "";
+    }
+
+    dd /= 1000; // in seconds
     let dur = "";
-    let dd = (end - start) / 1000; // in seconds
     if(dd < 0) {
       dur += "-";
       dd = -dd;	
@@ -265,10 +276,19 @@ var model = {
     return dur;
   },
 
+  mayVibrate: function(newBpmPc) {
+    if(HRW_VIBRATE_THRESHOLD === undefined ||
+       this.bpmPc === undefined ||
+       this.bpmPc >= HRW_VIBRATE_THRESHOLD ||
+       newBpmPc < HRW_VIBRATE_THRESHOLD) {
+      return;
+    }
+    w.vibrate(50, 1, 1000, 0);
+  },
+
   update: function(value) {
     // adapted from https://stackoverflow.com/a/52935617
     let offset = 1;
-
     if ((value.getUint8(0) & 0x01) === 0) {
         this.bpm = value.getUint8(1);
         offset = offset + 1; // plus 1 byte
@@ -278,8 +298,11 @@ var model = {
         this.bpm = (bpm >> 8) | ((bpm << 8) & 0xffff);
         offset =  offset + 2; // plus 2 bytes
     }
+    let bpmPc = this.computeBpmPc(this.bpm);
+    this.mayVibrate(bpmPc);
+    this.bpmPc = bpmPc;
 
-    // determine if RR interval data are present //
+    // determine if RR interval data are present
     if ((value.getUint8(0) & (1 << 4)) !== 0)
     {
       const length = value.byteLength;
@@ -349,7 +372,8 @@ var model = {
   reset: function() {
     this.startDate = undefined;
     this.endDate = undefined;
-    this.bpm = 0.0;
+    this.bpm = undefined;
+    this.bpmPc = undefined;
     this.rrArray.fill(0);
     this.rrDiff.fill(0);
     this.rrTotal.fill(0);
@@ -359,12 +383,12 @@ var model = {
     return (220 - age);
   },
 
-  computeBpm: function(rri, count) {
+  computeBpm: function(srri, count) {
     if(count === undefined) {
       count = 1;
     }
 
-    return (60.0 * 1024.0 * count) / rri;
+    return (60.0 * 1024.0 * count) / srri;
   },
 
   computeBpmPc: function(bpm) {
@@ -445,7 +469,7 @@ var model = {
     return this.computeBpm(this.computeTotalRRI(), this.computeTotalRRICount());
   },
 
-  hrToString: function(hr, nbDigits, pcNbDigits) {
+  hrToString: function(hr, nbDigits, pcNbDigits, hrPc) {
     if(isNaN(hr)) {
       return "N/A";
     }
@@ -455,7 +479,10 @@ var model = {
     if(pcNbDigits === undefined) {
       pcNbDigits = 1;
     }
-    return (hr.toFixed(nbDigits).toString() + " " + model.computeBpmPc(hr).toFixed(pcNbDigits).toString()+ "%");
+    if(hrPc === undefined) {
+      hrPc = model.computeBpmPc(hr);
+    }
+    return (hr.toFixed(nbDigits).toString() + " " + hrPc.toFixed(pcNbDigits).toString()+ "%");
   },
 
   nbToString: function(nb, nbDigits) {
@@ -684,7 +711,8 @@ var gui = {
             0x04: [function() {this.drawTitle("reboot");}, 0x05, 0x40],
             0x05: [function() {this.drawTitle("DFU mode");}, 0x06, 0x50],
             0x06: [function() {this.drawDeviceInfos();}, 0x07, 0x06],
-            0x07: [function() {this.drawTitle("off");}, 0x00, 0x70],
+            0x07: [function() {this.drawConfInfos();}, 0x08],
+            0x08: [function() {this.drawTitle("off");}, 0x00, 0x80],
             0x10: [function() {connectToHRM(true);}, 0x11, 0x11, 1],
             0x11: [function() {this.drawHRPanel();}, 0x12],
             0x12: [function() {this.drawHRPanel();}, 0x13],
@@ -695,13 +723,14 @@ var gui = {
             0x17: [function() {this.drawHRPanel();}, 0x18],
             0x18: [function() {this.drawHRPanel();}, 0x19],
             0x19: [function() {this.drawHRPanel();}, 0x1a],
-            0x1a: [function() {this.drawTitle("exit");}, 0x11, 0x1b],
-            0x1b: [function() {disconnectHRM();}, 0x00, 0x00, 1],
+            0x1a: [function() {this.drawHRPanel();}, 0x1b],
+            0x1b: [function() {this.drawTitle("exit");}, 0x11, 0x1c],
+            0x1c: [function() {disconnectHRM();}, 0x00, 0x00, 1],
             0x20: [function() {this.viewHRData();}, 0x00],
             0x30: [function() {revertBT();}, 0x00, 0x00, 1],
             0x40: [function() {E.reboot();}, 0x00],
-	    0x50: [function() {w.DFUmode();}, 0x00],
-            0x70: [function() {this.panelIdx = -1; o.off();}, 0x00],
+            0x50: [function() {w.DFUmode();}, 0x00],
+            0x80: [function() {this.panelIdx = -1; o.off();}, 0x00],
   },
 
   nextPanel: function(idx1, idx2, timeout) {
@@ -736,7 +765,7 @@ var gui = {
     o.gfx.setFontDennis8();
     if(this.panelTimeout !== undefined) {
       const end = (this.panelTimeout === 0) ? 0 : (this.panelTimeout - 1);
-      duration = model.computeDuration(0.0, end * 1000.0);
+      duration = model.durationToString(0.0, end * 1000.0);
     }
 
     let header = "";
@@ -789,7 +818,16 @@ var gui = {
     this.drawHeader();
     this.drawBody("Name: " + w.deviceName(),
                   "BT addr: " + NRF.getAddress(),
-		  "Temp: " + E.getTemperature().toFixed(2).toString() + " °C");
+		              "Temp: " + E.getTemperature().toFixed(2).toString() + " °C");
+    o.flip();
+  },
+
+  drawConfInfos: function() {
+    o.on();
+    this.drawHeader();
+    this.drawBody("Age: " + model.age,
+                  "Max HR: " + model.computeMaxHR(model.age),
+                  "HRM addr: " + HRW_HRMONITOR_ADDR);
     o.flip();
   },
 
@@ -807,13 +845,16 @@ var gui = {
     o.on();
     o.gfx.clear();
     let hhr = model.bpm;
+    let hhrPc = model.bpmPc;
     if(this.panelIdx === 0x11) {
       hhr = model.computeAvgHR();
+      hhrPc = model.computeBpmPc(hhr);
     }
-    this.drawHeader(model.computeDuration(), "\x80 " + model.hrToString(hhr, 0, 0));
+    let dur = model.computeDuration();
+    this.drawHeader(model.durationToString(0, dur), "\x80 " + model.hrToString(hhr, 0, 0, hhrPc));
     switch(this.panelIdx) {
       case 0x11:
-        this.drawBody(model.hrToString(model.bpm, 0, 1));
+        this.drawBody(model.hrToString(model.bpm, 0, 1, model.bpmPc));
         break;
       case 0x12: {
         const ihr = model.computeIHR();
@@ -851,19 +892,24 @@ var gui = {
                       "ln(SDNN): " + model.nbToString(Math.log(sdnn5m))); }
         break;
       case 0x17: {
-        this.drawBody("< 50%:   " + model.computeDuration(0, model.computeTotalRRI(0) / 1.024),
-                      "50%-60%: " + model.computeDuration(0, model.computeTotalRRI(1) / 1.024),
-                      "60%-70%: " + model.computeDuration(0, model.computeTotalRRI(2) / 1.024)); }
+        this.drawBody("< 50%:   " + model.durationToString(0, model.computeTotalRRI(0) / 1.024),
+                      "50%-60%: " + model.durationToString(0, model.computeTotalRRI(1) / 1.024),
+                      "60%-70%: " + model.durationToString(0, model.computeTotalRRI(2) / 1.024)); }
         break;
       case 0x18: {
-        this.drawBody("70%-80%: " + model.computeDuration(0, model.computeTotalRRI(3) / 1.024),
-                      "80%-90%: " + model.computeDuration(0, model.computeTotalRRI(4) / 1.024),
-                      "90%-100%: " + model.computeDuration(0, model.computeTotalRRI(5) / 1.024)); }
+        this.drawBody("70%-80%: " + model.durationToString(0, model.computeTotalRRI(3) / 1.024),
+                      "80%-90%: " + model.durationToString(0, model.computeTotalRRI(4) / 1.024),
+                      "90%-100%: " + model.durationToString(0, model.computeTotalRRI(5) / 1.024)); }
         break;
       case 0x19: {
-        this.drawBody(">= 100%: " + model.computeDuration(0, model.computeTotalRRI(6) / 1.024),
-                      "Nb RRI: " + model.computeTotalRRICount(),
-                      "Max HR: " + model.computeMaxHR(model.age)); }
+        const totalDur = model.computeTotalRRI() / 1.024;
+        this.drawBody(">= 100%: " + model.durationToString(0, model.computeTotalRRI(6) / 1.024),
+                      "Total: " + model.durationToString(0, totalDur),
+                      "Missing:  " + model.durationToString(0, dur - totalDur)); }
+        break;
+      case 0x1a: {
+        this.drawBody("RRI count: " + model.computeTotalRRICount(),
+                      "AVG RRI: " + model.nbToString(model.computeTotalRRI() / (model.computeTotalRRICount() * 1.024)) + " ms"); }
         break;
     }
     o.flip();
