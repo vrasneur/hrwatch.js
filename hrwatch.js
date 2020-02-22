@@ -1,6 +1,6 @@
 const HRW_HRMONITOR_ADDR = CHANGE_ME;
 const HRW_AGE = CHANGE_ME;
-const HRW_VIBRATE_THRESHOLD = CHANGE_ME;
+const HRW_ALERT_THRESHOLD = CHANGE_ME;
 const HRW_PASSWORD = CHANGE_ME;
 
 E.setPassword(HRW_PASSWORD);
@@ -62,6 +62,7 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
   gfxV=Graphics.createArrayBuffer(32,128,1,{vertical_byte : false});
   gfxH=Graphics.createArrayBuffer(128,32,1,{vertical_byte : true});
   oled.isOn=false;
+  oled.isInverted=false;
   oled.init = function(cmdArray){
     if (cs) cs.reset();
     // configure the OLED
@@ -70,6 +71,7 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
     digitalWrite(dc,1); // data
     if (cs) cs.set();
   };
+
   oled.setRotation = function(r){
     if (r === 0){rotCmds[1]=1;rotCmds[2]=0xa1;rotCmds[3]=0xc8;}
     if (r === 180){rotCmds[1]=1;rotCmds[2]=0xa0;rotCmds[3]=0xc0;}
@@ -79,6 +81,7 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
     rot=r;
     oled.init(rotCmds);
   };
+
   if (rst) digitalPulse(rst,0,20);
   setTimeout(function() {
     oled.init(initCmds);
@@ -87,6 +90,7 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
     // if there is a callback, call it now(ish)
     if (callback !== undefined) setTimeout(callback, 10);
   }, 50);
+
   // write to the screen
   oled.flip = function() {
     // set how the data is to be sent (whole screen)
@@ -104,6 +108,7 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
     spi.write(0x81,c,dc);
     if (cs) cs.set();
   };
+
   // set off
   oled.off = function() {
     if (cs) cs.reset();
@@ -118,6 +123,15 @@ exports.connectSPI = function(spi, dc,  rst, callback, options) {
     spi.write(0xAF,dc);
     if (cs) cs.set();
     oled.isOn=true;
+  };
+
+  // invert screen
+  oled.invert = function(enable) {
+    if (enable === undefined) enable = !oled.isInverted;
+    if (cs) cs.reset();
+    spi.write(enable ? 0xA7 : 0xA6,dc);
+    if (cs) cs.set();
+    oled.isInverted=!!enable;
   };
 
   // return graphics
@@ -222,9 +236,11 @@ function pauseConsole(s){
 var model = {
   startDate: undefined,
   endDate: undefined,
-  age: HRW_AGE,
   bpm: undefined,
   bpmPc: undefined,
+  alertStart: undefined,
+  alertDur: 0.0,
+  alertInstDur: 0.0,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
   rrDiff: new Int16Array(1500), // store (RRI prec - RRI) to precompute RMSSD for short durations
   rrTotal: new Float64Array(3 * 7), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zone (7)
@@ -246,14 +262,22 @@ var model = {
     return (end - start);
   },
 
-  durationToString: function(start, end) {
+  computeDurationPc: function(dur, zone) {
+    const totalZone = model.computeTotalRRI(zone);
+    if(totalZone === undefined) {
+      return undefined;
+    }
+    return 100.0 * ((totalZone / 1.024) / dur);
+  },
+
+  durationToString: function(start, end, showMs) {
     let dd = this.computeDuration(start, end);
     if(dd === undefined) {
       return "";
     }
 
-    dd /= 1000; // in seconds
     let dur = "";
+    dd /= 1000; // in seconds
     if(dd < 0) {
       dur += "-";
       dd = -dd;	
@@ -273,17 +297,48 @@ var model = {
       s = "0" + s;
     }
     dur += s;
+    if(showMs) {
+      const ms = (dd % 1000) + 1000;
+      dur += "." + ms.toFixed(0).substr(1);
+    }
+
     return dur;
   },
 
-  mayVibrate: function(newBpmPc) {
-    if(HRW_VIBRATE_THRESHOLD === undefined ||
-       this.bpmPc === undefined ||
-       this.bpmPc >= HRW_VIBRATE_THRESHOLD ||
-       newBpmPc < HRW_VIBRATE_THRESHOLD) {
+  mayAlert: function(newBpmPc) {
+    if(HRW_ALERT_THRESHOLD === undefined) {
       return;
     }
-    w.vibrate(50, 1, 1000, 0);
+
+    if(newBpmPc === undefined) {
+      // TODO: handle error
+      return;
+    }
+
+    if(newBpmPc >= HRW_ALERT_THRESHOLD) {
+      const now = Date.now();
+      // inside alert zone?
+      if(this.bpmPc !== undefined && this.bpmPc >= HRW_ALERT_THRESHOLD) {
+        if(this.alertStart !== undefined) {
+          this.alertDur += now - this.alertStart;
+        }
+      }
+      // entered alert zone?
+      else {
+        o.invert(true);
+        w.vibrate(100, 1, 1000, 0);
+      }
+
+      this.alertStart = now;
+    }
+    // left alert zone?
+    else if(this.bpmPc !== undefined && this.bpmPc >= HRW_ALERT_THRESHOLD) {
+      o.invert(false);
+      if(this.alertStart !== undefined) {
+        this.alertDur += Date.now() - this.alertStart;
+        this.alertStart = undefined;
+      }
+    }
   },
 
   update: function(value) {
@@ -299,7 +354,7 @@ var model = {
         offset =  offset + 2; // plus 2 bytes
     }
     let bpmPc = this.computeBpmPc(this.bpm);
-    this.mayVibrate(bpmPc);
+    this.mayAlert(bpmPc);
     this.bpmPc = bpmPc;
 
     // determine if RR interval data are present
@@ -316,6 +371,13 @@ var model = {
   },
 
   addRRI: function(rri) {
+    if(HRW_ALERT_THRESHOLD !== undefined) {
+      const pc = this.computeBpmPc(this.computeBpm(rri, 1));
+      if(pc >= HRW_ALERT_THRESHOLD) {
+        this.alertInstDur += rri;
+      }
+    }
+
     const zone = this.computeBpmZone(this.computeBpm(rri));
     this.rrTotal[3 * zone] += rri;
     this.rrTotal[(3 * zone) + 2]++;
@@ -374,9 +436,16 @@ var model = {
     this.endDate = undefined;
     this.bpm = undefined;
     this.bpmPc = undefined;
+    this.alertStart = undefined;
+    this.alertDur = 0.0;
+    this.alertInstDur = 0.0;
     this.rrArray.fill(0);
     this.rrDiff.fill(0);
     this.rrTotal.fill(0);
+  },
+
+  handleError: function() {
+    this.alertStart = undefined;
   },
 
   computeMaxHR: function(age) {
@@ -392,7 +461,7 @@ var model = {
   },
 
   computeBpmPc: function(bpm) {
-    return 100.0 * (bpm / this.computeMaxHR(this.age));
+    return 100.0 * (bpm / this.computeMaxHR(HRW_AGE));
   },
 
   // 7 zones : 0 (< 50%), 1 (50%-60%), 2 (60%-70%), 3 (70%-80%)
@@ -724,8 +793,11 @@ var gui = {
             0x18: [function() {this.drawHRPanel();}, 0x19],
             0x19: [function() {this.drawHRPanel();}, 0x1a],
             0x1a: [function() {this.drawHRPanel();}, 0x1b],
-            0x1b: [function() {this.drawTitle("exit");}, 0x11, 0x1c],
-            0x1c: [function() {disconnectHRM();}, 0x00, 0x00, 1],
+            0x1b: [function() {this.drawHRPanel();}, 0x1c],
+            0x1c: [function() {this.drawHRPanel();}, 0x1d],
+            0x1d: [function() {this.drawHRPanel();}, 0x1e],
+            0x1e: [function() {this.drawTitle("exit");}, 0x11, 0x1f],
+            0x1f: [function() {disconnectHRM();}, 0x00, 0x00, 1],
             0x20: [function() {this.viewHRData();}, 0x00],
             0x30: [function() {revertBT();}, 0x00, 0x00, 1],
             0x40: [function() {E.reboot();}, 0x00],
@@ -806,10 +878,10 @@ var gui = {
     }	
   },
 
-  drawTitle: function(title) {
+    drawTitle: function(title, line2, line3) {
     o.on();
     this.drawHeader();
-    this.drawBody(title);  
+	this.drawBody(title, line2, line3);
     o.flip();
   },
 
@@ -818,16 +890,20 @@ var gui = {
     this.drawHeader();
     this.drawBody("Name: " + w.deviceName(),
                   "BT addr: " + NRF.getAddress(),
-		              "Temp: " + E.getTemperature().toFixed(2).toString() + " °C");
+		              "Temp: " + model.nbToString(E.getTemperature(), 2).toString() + " °C");
     o.flip();
   },
 
   drawConfInfos: function() {
     o.on();
     this.drawHeader();
-    this.drawBody("Age: " + model.age,
-                  "Max HR: " + model.computeMaxHR(model.age),
-                  "HRM addr: " + HRW_HRMONITOR_ADDR);
+    const maxHr = model.computeMaxHR(HRW_AGE);
+    let line2 = "Alert: " + model.nbToString(HRW_ALERT_THRESHOLD);
+    if(HRW_ALERT_THRESHOLD !== undefined) {
+      line2 += "% \x85 HR: " + model.nbToString((HRW_ALERT_THRESHOLD / 100) * maxHr);
+    }
+    this.drawBody("Age: " + HRW_AGE + " \x85 Max HR: " + model.nbToString(maxHr),
+                  line2, "HRM addr: " + HRW_HRMONITOR_ADDR);
     o.flip();
   },
 
@@ -892,22 +968,48 @@ var gui = {
                       "ln(SDNN): " + model.nbToString(Math.log(sdnn5m))); }
         break;
       case 0x17: {
-        this.drawBody("< 50%:   " + model.durationToString(0, model.computeTotalRRI(0) / 1.024),
-                      "50%-60%: " + model.durationToString(0, model.computeTotalRRI(1) / 1.024),
-                      "60%-70%: " + model.durationToString(0, model.computeTotalRRI(2) / 1.024)); }
+        this.drawBody("  < 50%:   " + model.durationToString(0, model.computeTotalRRI(0) / 1.024, true),
+                      "50%-60%: " + model.durationToString(0, model.computeTotalRRI(1) / 1.024, true),
+                      "60%-70%: " + model.durationToString(0, model.computeTotalRRI(2) / 1.024, true)); }
         break;
       case 0x18: {
-        this.drawBody("70%-80%: " + model.durationToString(0, model.computeTotalRRI(3) / 1.024),
-                      "80%-90%: " + model.durationToString(0, model.computeTotalRRI(4) / 1.024),
-                      "90%-100%: " + model.durationToString(0, model.computeTotalRRI(5) / 1.024)); }
+        this.drawBody("70%-80%: " + model.durationToString(0, model.computeTotalRRI(3) / 1.024, true),
+                      "80%-90%: " + model.durationToString(0, model.computeTotalRRI(4) / 1.024, true),
+                      "90%-100%: " + model.durationToString(0, model.computeTotalRRI(5) / 1.024, true)); }
         break;
       case 0x19: {
         const totalDur = model.computeTotalRRI() / 1.024;
-        this.drawBody(">= 100%: " + model.durationToString(0, model.computeTotalRRI(6) / 1.024),
-                      "Total: " + model.durationToString(0, totalDur),
-                      "Missing:  " + model.durationToString(0, dur - totalDur)); }
+        this.drawBody(">= 100%: " + model.durationToString(0, model.computeTotalRRI(6) / 1.024, true),
+                      "Total: " + model.durationToString(0, totalDur, true),
+                      "Missing:  " + model.durationToString(0, dur - totalDur, true)); }
         break;
       case 0x1a: {
+        this.drawBody(("  < 50%: " + model.nbToString(model.computeDurationPc(dur, 0)) +
+                       "% \x9a 70%-80%: " + model.nbToString(model.computeDurationPc(dur, 3)) + " %"),
+                      ("50%-60%: " + model.nbToString(model.computeDurationPc(dur, 1)) +
+                       "% \x9a 80%-90%: " + model.nbToString(model.computeDurationPc(dur, 4)) + " %"),
+                      ("60%-70%: " + model.nbToString(model.computeDurationPc(dur, 2)) +
+                       "% \x9a 90%-100%: " + model.nbToString(model.computeDurationPc(dur, 5)) + " %")); }
+        break;
+      case 0x1b: {
+        const totalDur = model.computeTotalRRI() / 1.024;
+        this.drawBody(">= 100%: " + model.nbToString(model.computeDurationPc(dur, 6)) + "%",
+                      "Total: " + model.nbToString(model.computeDurationPc(dur, undefined)) + "%",
+                      "Missing:  " + model.nbToString(100.0 * ((dur - totalDur) / dur)) + "%"); }
+        break;
+      case 0x1c: {
+        if(HRW_ALERT_THRESHOLD === undefined) {
+          this.drawBody("alert disabled");
+        }
+        else {
+          this.drawBody("TODO",
+                        ("Alert: " + model.durationToString(0, model.alertDur, true) +
+                         " (" + model.nbToString(100.0 * (model.alertDur / dur)) + "%)"),
+                        ("Inst:  " + model.durationToString(0, model.alertInstDur / 1.024, true) +
+                         " (" + model.nbToString(100.0 * (model.alertInstDur / (1.024 * dur))) + "%)"));
+        } }
+        break;
+      case 0x1d: {
         this.drawBody("RRI count: " + model.computeTotalRRICount(),
                       "AVG RRI: " + model.nbToString(model.computeTotalRRI() / (model.computeTotalRRICount() * 1.024)) + " ms"); }
         break;
@@ -966,6 +1068,7 @@ function connectToHRM(s) {
     gatt = g;
     gatt.device.on('gattserverdisconnected', function(reason) {
       if(reason !== 0x16) {
+        model.handleError();
         gui.drawError("gdisconnected: " + reason);
         gatt = undefined;
         setTimeout(()=>{connectToHRM(undefined);}, 3000);
@@ -983,6 +1086,7 @@ function connectToHRM(s) {
   }).then(function() {
     console.log("Done!");
   }).catch(function(error) {
+    model.handleError();
     gui.drawError(error);
     setTimeout(()=>{o.off();}, 3000);
     console.log(error);
