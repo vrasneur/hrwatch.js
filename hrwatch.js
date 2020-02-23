@@ -311,7 +311,7 @@ var model = {
     }
 
     if(newBpmPc === undefined) {
-      // TODO: handle error
+      this.handleError();
       return;
     }
 
@@ -1002,8 +1002,9 @@ var gui = {
           this.drawBody("alert disabled");
         }
         else {
-          this.drawBody("TODO",
-                        ("Alert: " + model.durationToString(0, model.alertDur, true) +
+          this.drawBody(("Alert: " + model.nbToString(HRW_ALERT_THRESHOLD) +
+                         "% \x85 HR: " + model.nbToString((HRW_ALERT_THRESHOLD / 100) * maxHr)),
+                        ("Dur.: " + model.durationToString(0, model.alertDur, true) +
                          " (" + model.nbToString(100.0 * (model.alertDur / dur)) + "%)"),
                         ("Inst:  " + model.durationToString(0, model.alertInstDur / 1.024, true) +
                          " (" + model.nbToString(100.0 * (model.alertInstDur / (1.024 * dur))) + "%)"));
