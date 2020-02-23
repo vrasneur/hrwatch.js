@@ -1002,6 +1002,7 @@ var gui = {
           this.drawBody("alert disabled");
         }
         else {
+          const maxHr = model.computeMaxHR(HRW_AGE);
           this.drawBody(("Alert: " + model.nbToString(HRW_ALERT_THRESHOLD) +
                          "% \x85 HR: " + model.nbToString((HRW_ALERT_THRESHOLD / 100) * maxHr)),
                         ("Dur.: " + model.durationToString(0, model.alertDur, true) +
