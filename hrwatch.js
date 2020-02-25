@@ -243,7 +243,10 @@ var model = {
   alertInstDur: 0.0,
   rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
   rrDiff: new Int16Array(1500), // store (RRI prec - RRI) to precompute RMSSD for short durations
-  rrTotal: new Float64Array(7 * 8), // store sum of RRI values, rmssd precalculations and count of total RR intervals for each HR zone (7)
+  // store for each HR zone (8):
+  // sum of RRI values, rmssd precalculation, count of total RR intervals
+  // mean, variance precalculation, skewness precalculation, kurtosis precalculation
+  rrTotal: new Float64Array(7 * 8),
 
   computeDuration: function(start, end) {
     if(start === undefined) {
@@ -303,6 +306,39 @@ var model = {
     }
 
     return dur;
+  },
+
+  hrToString: function(hr, nbDigits, pcNbDigits, hrPc) {
+    if(isNaN(hr)) {
+      return "N/A";
+    }
+    if(nbDigits === undefined) {
+      nbDigits = 1;
+    }
+    if(pcNbDigits === undefined) {
+      pcNbDigits = 1;
+    }
+    if(hrPc === undefined) {
+      hrPc = model.computeBpmPc(hr);
+    }
+    return (hr.toFixed(nbDigits).toString() + " " + hrPc.toFixed(pcNbDigits).toString()+ "%");
+  },
+
+  nbToString: function(nb, nbDigits, total, pcNbDigits) {
+    if(isNaN(nb)) {
+      return "N/A";
+    }
+    if(nbDigits === undefined) {
+      nbDigits = 1;
+    }
+    let res = nb.toFixed(nbDigits).toString();
+    if(total !== undefined) {
+      if(pcNbDigits === undefined) {
+        pcNbDigits = 1;
+      }
+      res += " " + (100.0 * (nb / total)).toFixed(pcNbDigits).toString() + "%";
+    }
+    return res;
   },
 
   mayAlert: function(newBpmPc) {
@@ -379,6 +415,7 @@ var model = {
     if(diff2 !== undefined) {
       this.rrTotal[idx + 1] += diff2;
     }
+    // adapted from https://www.johndcook.com/blog/skewness_kurtosis/
     const n = ++this.rrTotal[idx + 2];
     const delta = rri - this.rrTotal[idx + 3];
     const delta_n = delta / n;
@@ -394,7 +431,7 @@ var model = {
 
   addRRI: function(rri) {
     if(HRW_ALERT_THRESHOLD !== undefined) {
-      const pc = this.computeBpmPc(this.computeBpm(rri, 1));
+      const pc = this.computeBpmPc(this.computeBpm(rri));
       if(pc >= HRW_ALERT_THRESHOLD) {
         this.alertInstDur += rri;
       }
@@ -423,74 +460,6 @@ var model = {
     return this.rrArray[1];
   },
 
-  computeTotalRRI: function(zone, index) {
-    if(index === undefined) {
-      index = 0;
-    }
-    if(zone === undefined) {
-      zone = 7;
-    }
-
-    return this.rrTotal[(7 * zone) + index];
-  },
-
-  computeTotalRRICount: function(zone) {
-    return this.computeTotalRRI(zone, 2);
-  },
-
-  computeTotalRMSSD: function(zone) {
-    const count = this.computeTotalRRICount(zone);
-    if(count < 2) {
-      return undefined;
-    }
-
-    return Math.sqrt(this.computeTotalRRI(zone, 1) / (count - 1)) / 1.024;
-  },
-
-  computeTotalAvgRRI: function(zone) {
-    return this.computeTotalRRI(zone, 3);
-  },
-
-  computeTotalRRIVariance: function(zone) {
-    const count = this.computeTotalRRICount(zone);
-    if(count < 1) {
-      return undefined;
-    }
-
-      return this.computeTotalRRI(zone, 4) / ((count - 1) * Math.pow(1.024, 2));
-  },
-
-  computeTotalSDNN: function(zone) {
-    const count = this.computeTotalRRICount(zone);
-    if(count < 1) {
-      return undefined;
-    }
-
-    return Math.sqrt(this.computeTotalRRIVariance(zone));
-  },
-
-  computeTotalRRISkewness: function(zone) {
-    const count = this.computeTotalRRICount(zone);
-    if(count < 1) {
-      return undefined;
-    }
-
-    const M2 = this.computeTotalRRI(zone, 4);
-    const M3 = this.computeTotalRRI(zone, 5);
-    return Math.sqrt(count) * M3 / Math.pow(M2, 1.5);
-  },
-
-  computeTotalRRIKurtosis: function(zone) {
-    const count = this.computeTotalRRICount(zone);
-    if(count < 1) {
-      return undefined;
-    }
-
-    const M2 = this.computeTotalRRI(zone, 4);
-    const M4 = this.computeTotalRRI(zone, 6);
-    return count * M4 / Math.pow(M2, 2) - 3.0;
-  },
-
   empty: function() {
     return (this.rrLength() === 0 && this.startDate === undefined);
   },
@@ -506,6 +475,80 @@ var model = {
     this.rrArray.fill(0);
     this.rrDiff.fill(0);
     this.rrTotal.fill(0);
+  },
+
+  computeTotalRRI: function(zone, index) {
+    if(index === undefined) {
+      index = 0;
+    }
+    if(zone === undefined) {
+      zone = 7;
+    }
+
+    return this.rrTotal[(7 * zone) + index];
+  },
+
+  computeTotalRRICount: function(zone) {
+    return this.computeTotalRRI(zone, 2);
+  },
+
+  // Bessel-corrected RMSSD in ms (not in 1/1024 format)
+  computeTotalRMSSD: function(zone) {
+    const count = this.computeTotalRRICount(zone);
+    if(count < 2) {
+      return undefined;
+    }
+
+    return Math.sqrt(this.computeTotalRRI(zone, 1) / (count - 1)) / 1.024;
+  },
+
+  // mean RRI in 1/1024 format
+  computeTotalAvgRRI: function(zone) {
+    return this.computeTotalRRI(zone, 3);
+  },
+
+  // Bessel-corrected variance in ms^2 (not in 1/1024 format)
+  computeTotalRRIVariance: function(zone) {
+    const count = this.computeTotalRRICount(zone);
+    if(count < 1) {
+      return undefined;
+    }
+
+      return this.computeTotalRRI(zone, 4) / ((count - 1) * Math.pow(1.024, 2));
+  },
+
+  // Bessel-corrected standard deviation in ms (not in 1/1024 format)
+  computeTotalSDNN: function(zone) {
+    const count = this.computeTotalRRICount(zone);
+    if(count < 1) {
+      return undefined;
+    }
+
+    return Math.sqrt(this.computeTotalRRIVariance(zone));
+  },
+
+  // RRI skewness (no unit)
+  computeTotalRRISkewness: function(zone) {
+    const count = this.computeTotalRRICount(zone);
+    if(count < 1) {
+      return undefined;
+    }
+
+    const M2 = this.computeTotalRRI(zone, 4);
+    const M3 = this.computeTotalRRI(zone, 5);
+    return Math.sqrt(count) * M3 / Math.pow(M2, 1.5);
+  },
+
+  // RRI kurtosis (no unit)
+  computeTotalRRIKurtosis: function(zone) {
+    const count = this.computeTotalRRICount(zone);
+    if(count < 1) {
+      return undefined;
+    }
+
+    const M2 = this.computeTotalRRI(zone, 4);
+    const M4 = this.computeTotalRRI(zone, 6);
+    return count * M4 / Math.pow(M2, 2) - 3.0;
   },
 
   handleError: function() {
@@ -528,8 +571,8 @@ var model = {
     return 100.0 * (bpm / this.computeMaxHR(HRW_AGE));
   },
 
-  // 7 zones : 0 (< 50%), 1 (50%-60%), 2 (60%-70%), 3 (70%-80%)
-  //           4 (80%-90%), 5 (90%-100%), 6 (>= 100%)
+  // 8 zones : 0 (< 50%), 1 (50%-60%), 2 (60%-70%), 3 (70%-80%)
+  //           4 (80%-90%), 5 (90%-100%), 6 (>= 100%), 7 (total of all zones)
   computeBpmZone: function(bpm) {
     const pc = this.computeBpmPc(bpm);
     if(pc < 50.0) {
@@ -540,6 +583,25 @@ var model = {
     }
 
     return ~~((pc - 40) / 10);
+  },
+
+  // compute HR (bpm) for "count" RR intervals.
+  computeHR: function(count) {
+    const srri = this.sumRRI(count);
+    if(srri === undefined) {
+      return undefined;
+    }
+
+    return this.computeBpm(srri, count);
+  },
+
+  // compute instantaneous heart rate
+  computeIHR: function() {
+    return this.computeHR(1);
+  },
+
+  computeAvgHR: function(zone) {
+    return this.computeBpm(this.computeTotalAvgRRI(zone));
   },
 
   sumRRI: function(count) {
@@ -583,55 +645,7 @@ var model = {
     return srri;
   },
 
-  // compute HR (bpm) for "count" RR intervals.
-  computeHR: function(count) {
-    const srri = this.sumRRI(count);
-    if(srri === undefined) {
-      return undefined;
-    }
-
-    return this.computeBpm(srri, count);
-  },
-
-  // compute instantaneous heart rate
-  computeIHR: function() {
-    return this.computeHR(1);
-  },
-
-  computeAvgHR: function(zone) {
-    return this.computeBpm(this.computeTotalRRI(zone), this.computeTotalRRICount(zone));
-  },
-
-  computeAvgHR2: function(zone) {
-    return this.computeBpm(this.computeTotalRRI(zone, 3), 1);
-  },
-
-  hrToString: function(hr, nbDigits, pcNbDigits, hrPc) {
-    if(isNaN(hr)) {
-      return "N/A";
-    }
-    if(nbDigits === undefined) {
-      nbDigits = 1;
-    }
-    if(pcNbDigits === undefined) {
-      pcNbDigits = 1;
-    }
-    if(hrPc === undefined) {
-      hrPc = model.computeBpmPc(hr);
-    }
-    return (hr.toFixed(nbDigits).toString() + " " + hrPc.toFixed(pcNbDigits).toString()+ "%");
-  },
-
-  nbToString: function(nb, nbDigits) {
-    if(isNaN(nb)) {
-      return "N/A";
-    }
-    if(nbDigits === undefined) {
-      nbDigits = 1;
-    }
-    return nb.toFixed(nbDigits).toString();
-  },
-
+  // Bessel-corrected RMSSD for "count" RRIs in ms (not in 1/1024 format)
   computeRMSSD: function(count) {
     const length = this.rrArray[1];
     if(length < 2) {
@@ -687,6 +701,7 @@ var model = {
     return rmssd;
   }, 
 
+  // Bessel-corrected standard deviation for "count" RRIs in ms (not in 1/1024 format)
   computeSDNN: function(count) {
     const length = this.rrArray[1];
     if(length < 2) {
@@ -849,7 +864,8 @@ var gui = {
             0x005: [function() {this.drawTitle("DFU mode");}, 0x006, 0x500],
             0x006: [function() {this.drawDeviceInfos();}, 0x007, 0x006],
             0x007: [function() {this.drawConfInfos();}, 0x008],
-            0x008: [function() {this.drawTitle("off");}, 0x000, 0x800],
+            0x008: [function() {this.drawMemInfos();}, 0x009],
+            0x009: [function() {this.drawTitle("off");}, 0x000, 0x900],
             0x100: [function() {connectToHRM(true);}, 0x101, 0x101, 1],
             0x101: [function() {this.drawHRPanel();}, 0x102],
             0x102: [function() {this.drawHRPanel();}, 0x103],
@@ -866,15 +882,15 @@ var gui = {
             0x10d: [function() {this.drawHRPanel();}, 0x10e],
             0x10e: [function() {this.drawHRPanel();}, 0x10f],
             0x10f: [function() {this.drawHRPanel();}, 0x110],
-	    0x110: [function() {this.drawHRPanel();}, 0x111],
-	    0x111: [function() {this.drawHRPanel();}, 0x1fe],
+      	    0x110: [function() {this.drawHRPanel();}, 0x111],
+	          0x111: [function() {this.drawHRPanel();}, 0x1fe],
             0x1fe: [function() {this.drawTitle("exit");}, 0x101, 0x1ff],
             0x1ff: [function() {disconnectHRM();}, 0x000, 0x000, 1],
             0x200: [function() {this.viewHRData();}, 0x000],
             0x300: [function() {revertBT();}, 0x000, 0x000, 1],
             0x400: [function() {E.reboot();}, 0x000],
             0x500: [function() {w.DFUmode();}, 0x000],
-            0x800: [function() {this.panelIdx = -1; o.off();}, 0x000],
+            0x900: [function() {this.panelIdx = -1; o.off();}, 0x000],
   },
 
   nextPanel: function(idx1, idx2, timeout) {
@@ -976,6 +992,16 @@ var gui = {
     }
     this.drawBody("Age: " + HRW_AGE + " \x85 Max HR: " + model.nbToString(maxHr),
                   line2, "HRM addr: " + HRW_HRMONITOR_ADDR);
+    o.flip();
+  },
+
+  drawMemInfos: function() {
+    o.on();
+    this.drawHeader();
+    const mem = process.memory();
+    this.drawBody("Used mem: " + model.nbToString(mem.usage, 0, mem.total),
+                  "Free mem: " + model.nbToString(mem.free, 0, mem.total),
+                  "Total mem: " + model.nbToString(mem.total, 0, mem.total));
     o.flip();
   },
 
@@ -1108,8 +1134,8 @@ var gui = {
         break;
     case 0x111: {
         this.drawBody("Debugging stuff!",
-                        "RRI Buf count: " + model.rrArray[1],
-                        "RRI Buf idx: " + model.rrArray[0]); }
+                      "RRI Buf count: " + model.rrArray[1],
+                      "RRI Buf idx: " + model.rrArray[0]); }
         break;
     }
     o.flip();
