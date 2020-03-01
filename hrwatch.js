@@ -241,12 +241,16 @@ var model = {
   alertStart: undefined,
   alertDur: 0.0,
   alertInstDur: 0.0,
-  rrArray: new Uint16Array(1502), // The 1st and 2nd array elts are reserved to store current index and count
-  rrDiff: new Int16Array(1500), // store (RRI prec - RRI) to precompute RMSSD for short durations
+  // The 1st and 2nd array elts are reserved to store current index and count
+  rrArray: new Uint16Array(1502),
+  // store (RRI prec - RRI) to precompute RMSSD for short durations
+  rrDiff: new Int16Array(1500),
   // store for each HR zone (8):
   // sum of RRI values, rmssd precalculation, count of total RR intervals
   // mean, variance precalculation, skewness precalculation, kurtosis precalculation
   rrTotal: new Float64Array(7 * 8),
+  // reserved for mode and stress index calculations
+  rrCounts: new Uint24Array(1201),
 
   computeDuration: function(start, end) {
     if(start === undefined) {
@@ -475,6 +479,7 @@ var model = {
     this.rrArray.fill(0);
     this.rrDiff.fill(0);
     this.rrTotal.fill(0);
+    this.rrCounts.fill(0);
   },
 
   computeTotalRRI: function(zone, index) {
@@ -560,6 +565,10 @@ var model = {
   },
 
   computeBpm: function(srri, count) {
+    if(!srri) {
+      return undefined;	  
+    }
+	
     if(count === undefined) {
       count = 1;
     }
@@ -856,6 +865,7 @@ var gui = {
   nextPanelIdx: 0,
   panelTimeout: undefined,
   timeoutId: -1,
+  modelUpdateDur: undefined,
   panels: { 0x000: [function() {this.drawTitle("welcome");}, 0x001],
             0x001: [function() {this.drawTitle("start");}, 0x002, 0x100],
             0x002: [function() {this.drawTitle("view");}, 0x003, 0x200],
@@ -864,7 +874,7 @@ var gui = {
             0x005: [function() {this.drawTitle("DFU mode");}, 0x006, 0x500],
             0x006: [function() {this.drawDeviceInfos();}, 0x007, 0x006],
             0x007: [function() {this.drawConfInfos();}, 0x008],
-            0x008: [function() {this.drawMemInfos();}, 0x009],
+            0x008: [function() {this.drawMemInfos();}, 0x009, 0x008],
             0x009: [function() {this.drawTitle("off");}, 0x000, 0x900],
             0x100: [function() {connectToHRM(true);}, 0x101, 0x101, 1],
             0x101: [function() {this.drawHRPanel();}, 0x102],
@@ -883,7 +893,7 @@ var gui = {
             0x10e: [function() {this.drawHRPanel();}, 0x10f],
             0x10f: [function() {this.drawHRPanel();}, 0x110],
       	    0x110: [function() {this.drawHRPanel();}, 0x111],
-	          0x111: [function() {this.drawHRPanel();}, 0x1fe],
+            0x111: [function() {this.drawHRPanel();}, 0x1fe],
             0x1fe: [function() {this.drawTitle("exit");}, 0x101, 0x1ff],
             0x1ff: [function() {disconnectHRM();}, 0x000, 0x000, 1],
             0x200: [function() {this.viewHRData();}, 0x000],
@@ -1133,7 +1143,7 @@ var gui = {
                       "Kurtosis: " + model.nbToString(model.computeTotalRRIKurtosis())); }
         break;
     case 0x111: {
-        this.drawBody("Debugging stuff!",
+        this.drawBody("Model update: " + model.nbToString(this.modelUpdateDur) + " ms",
                       "RRI Buf count: " + model.rrArray[1],
                       "RRI Buf idx: " + model.rrArray[0]); }
         break;
@@ -1149,7 +1159,8 @@ var gui = {
     o.flip();
   },
 
-  updatePanel: function() {
+  updatePanel: function(modelUpdateDur) {
+    this.modelUpdateDur = modelUpdateDur;
     if(this.panelIdx !== -1) {
       this.panels[this.panelIdx][0].call(this);
     }
@@ -1180,6 +1191,7 @@ var gui = {
     this.nextPanelIdx = 0;
     this.panelTimeout = undefined;
     this.timeoutId = -1;
+    this.modelUpdateDur = undefined;
   },
 };
 
@@ -1203,8 +1215,9 @@ function connectToHRM(s) {
     return service.getCharacteristic(0x2a37);
   }).then(function(characteristic) {
     characteristic.on('characteristicvaluechanged', function(event) {
-      model.update(event.target.value);
-      gui.updatePanel();
+	const start = Date.now();  
+	model.update(event.target.value);
+	gui.updatePanel(Date.now() - start);
     });
     return characteristic.startNotifications();
   }).then(function() {
