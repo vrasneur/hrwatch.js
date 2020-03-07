@@ -242,15 +242,18 @@ var model = {
   alertDur: 0.0,
   alertInstDur: 0.0,
   // The 1st and 2nd array elts are reserved to store current index and count
-  rrArray: new Uint16Array(1502),
+  rrArray: new Uint16Array(2 + 1500),
   // store (RRI prec - RRI) to precompute RMSSD for short durations
   rrDiff: new Int16Array(1500),
   // store for each HR zone (8):
   // sum of RRI values, rmssd precalculation, count of total RR intervals
-  // mean, variance precalculation, skewness precalculation, kurtosis precalculation
-  rrTotal: new Float64Array(7 * 8),
-  // reserved for mode and stress index calculations
-  rrCounts: new Uint24Array(1201),
+  // mean, variance precalculation, skewness precalculation, kurtosis precalculation, min, max
+  rrTotal: new Float64Array(9 * 8),
+  // for mode and stress index calculations
+  rrCounts: new Uint24Array(1 + 1200),
+  rrBins: new Uint24Array(1 + 24),
+  // reserved for RRI filtering
+  rrBuffer: new Uint16Array(5 + 50),
 
   computeDuration: function(start, end) {
     if(start === undefined) {
@@ -414,7 +417,7 @@ var model = {
     if(zone === undefined) {
         zone = 7;
     }
-    const idx = 7 * zone;
+    const idx = 9 * zone;
     this.rrTotal[idx] += rri;
     if(diff2 !== undefined) {
       this.rrTotal[idx + 1] += diff2;
@@ -425,12 +428,51 @@ var model = {
     const delta_n = delta / n;
     const delta_n2 = Math.pow(delta_n, 2);
     const term1 = delta * delta_n * (n - 1);
+    // update moments precomputations
     this.rrTotal[idx + 3] += delta_n;
     const M2 = this.rrTotal[idx + 4];
     const M3 = this.rrTotal[idx + 5];
     this.rrTotal[idx + 6] += term1 * delta_n2 * (n*n - 3*n + 3) + 6 * delta_n2 * M2 - 4 * delta_n * M3;
     this.rrTotal[idx + 5] += term1 * delta_n * (n - 2) - 3 * delta_n * M2;
     this.rrTotal[idx + 4] += term1;
+    // update min
+    const minRRI = this.rrTotal[idx + 7];
+    if(!minRRI || rri < minRRI) {
+      this.rrTotal[idx + 7] = rri;
+    }
+    // update max
+    const maxRRI = this.rrTotal[idx + 8];
+    if(maxRRI < rri) {
+      this.rrTotal[idx + 8] = rri;
+    }
+  },
+
+  updateRRICounts: function(rri) {
+    rri = ~~(rri / 1.024) - 300;
+    // keep counts for the RRIs between 300 and 1200 ms
+    if(rri < 0 || rri >= 1200) {
+      return;
+    }
+
+    // update current mode
+    let maxIdx = this.rrCounts[0];
+    let rrIdx = 1 + rri;  
+    let count = ++this.rrCounts[rrIdx];
+    if(maxIdx == 0 ||
+       (maxIdx !== rrIdx && this.rrCounts[maxIdx] < count)) {
+      this.rrCounts[0] = rrIdx;
+    }
+
+    // update mode bin (50 ms width)
+    rri = ~~(rri / 50);
+    maxIdx = this.rrBins[0];
+    rrIdx = 1 + rri;  
+    count = ++this.rrBins[rrIdx];
+    if(maxIdx == 0 ||
+       (maxIdx !== rrIdx && this.rrBins[maxIdx] < count)) {
+      this.rrBins[0] = rrIdx;
+    }
+    
   },
 
   addRRI: function(rri) {
@@ -458,6 +500,7 @@ var model = {
       this.rrArray[1]++;
     }
     this.rrArray[2 + this.rrArray[0]] = rri;
+    this.updateRRICounts(rri);
   },
 
   rrLength: function() {
@@ -490,7 +533,7 @@ var model = {
       zone = 7;
     }
 
-    return this.rrTotal[(7 * zone) + index];
+    return this.rrTotal[(9 * zone) + index];
   },
 
   computeTotalRRICount: function(zone) {
@@ -555,7 +598,45 @@ var model = {
     const M4 = this.computeTotalRRI(zone, 6);
     return count * M4 / Math.pow(M2, 2) - 3.0;
   },
+  
+  // min RRI in 1/1024 format
+  computeTotalRRIMin: function(zone) {
+    return this.computeTotalRRI(zone, 7);
+  },
 
+  // max RRI in 1/1024 format
+  computeTotalRRIMax: function(zone) {
+    return this.computeTotalRRI(zone, 8);
+  },
+
+  // mode in ms
+  computeRRIMode: function() {
+    const idx = this.rrCounts[0];
+    if(!idx) {
+      return undefined;
+    }
+
+    return 300 + idx - 1;
+  },
+
+  computeRRIModeCount: function() {
+    const idx = this.rrCounts[0];
+    if(!idx) {
+      return undefined;
+    }
+
+    return this.rrCounts[idx];
+  },
+
+  computeRRIModeAmplitude: function() {
+    const idx = this.rrBins[0];
+    if(!idx) {
+      return undefined;
+    }
+
+    return this.rrBins[idx] / this.computeTotalRRICount();
+  },
+  
   handleError: function() {
     this.alertStart = undefined;
   },
@@ -772,6 +853,14 @@ var model = {
     return sdnn;
   },
 
+  // compute Baevsky's stress index (no unit)
+  computeStressIndex: function() {
+    const amo = 100.0 * this.computeRRIModeAmplitude();
+    const mo = this.computeRRIMode() / 1000.0;
+    const mxdmn = (this.computeTotalRRIMax() - this.computeTotalRRIMin()) / 1024.0;
+    return amo / (2 * mo * mxdmn);
+  },
+
   // how many RR intervals for a duration of "dur" seconds?
   countRRI: function(dur) {
     const length = this.rrArray[1];
@@ -893,7 +982,8 @@ var gui = {
             0x10e: [function() {this.drawHRPanel();}, 0x10f],
             0x10f: [function() {this.drawHRPanel();}, 0x110],
       	    0x110: [function() {this.drawHRPanel();}, 0x111],
-            0x111: [function() {this.drawHRPanel();}, 0x1fe],
+            0x111: [function() {this.drawHRPanel();}, 0x112],
+            0x112: [function() {this.drawHRPanel();}, 0x1fe],
             0x1fe: [function() {this.drawTitle("exit");}, 0x101, 0x1ff],
             0x1ff: [function() {disconnectHRM();}, 0x000, 0x000, 1],
             0x200: [function() {this.viewHRData();}, 0x000],
@@ -979,7 +1069,7 @@ var gui = {
     drawTitle: function(title, line2, line3) {
     o.on();
     this.drawHeader();
-	this.drawBody(title, line2, line3);
+    this.drawBody(title, line2, line3);
     o.flip();
   },
 
@@ -1018,7 +1108,7 @@ var gui = {
   viewHRData: function() {
     if(model.empty()) {
       this.drawTitle("no data!");
-      this.nextPanel(0x1a);
+      this.nextPanel(0x1fe);
     }
     else {
       this.nextPanel(0x101, 0x101, 1);
@@ -1136,17 +1226,22 @@ var gui = {
         break;
       case 0x10f: {
         this.drawBody("RRI count: " + model.computeTotalRRICount(),
-                      "AVG RRI: " + model.nbToString(model.computeTotalRRI() / (model.computeTotalRRICount() * 1.024)) + " ms"); }
+                      "AVG RRI: " + model.nbToString(model.computeTotalAvgRRI() / 1.024) + " ms"); }
         break;
       case 0x110: {
         this.drawBody("Skewness: " + model.nbToString(model.computeTotalRRISkewness()),
                       "Kurtosis: " + model.nbToString(model.computeTotalRRIKurtosis())); }
         break;
-    case 0x111: {
+      case 0x111: {
+        const si = model.computeStressIndex();
+        this.drawBody("Str. idx: " + model.nbToString(si),
+                      "SQRT(SI): " + model.nbToString(Math.sqrt(si))); }
+        break;
+      case 0x112: {
         this.drawBody("Model update: " + model.nbToString(this.modelUpdateDur) + " ms",
                       "RRI Buf count: " + model.rrArray[1],
                       "RRI Buf idx: " + model.rrArray[0]); }
-        break;
+        break;  
     }
     o.flip();
   },
